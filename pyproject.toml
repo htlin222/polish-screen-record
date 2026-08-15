@@ -8,6 +8,7 @@ dependencies = [
     "google-auth-oauthlib>=1.4.0",
     "groq>=1.6.0",
     "opencc-python-reimplemented>=0.1.7",
+    "pyyaml>=6.0.3",
     "zhconv>=1.4.3",
 ]
 
