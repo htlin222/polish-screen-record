@@ -17,6 +17,25 @@ Drive 上 1–8GB 的螢幕錄製教學影片 → 自動產出潤稿過的繁體
 
 ---
 
+## 1.5 兩種來源
+
+pipeline 接受兩種輸入，在取得 `words.json` 之後完全共用同一條下游流程。
+
+| 來源 | issue 內文 | 產物位置 |
+| --- | --- | --- |
+| Drive 既有影片 | Drive 檔案連結或 ID | 與 mp4 同一個資料夾 |
+| YouTube | YouTube 連結 | `videos/<slug>/` |
+
+**YouTube 路徑**：解析 video ID → `yt-dlp` 取標題 → `slugify` → 在 Colab VM 上下載 mp4 並上傳到 Drive 的 `videos/<slug>/<slug>.raw.mp4` → 之後與 Drive 路徑完全相同。
+
+在 **VM 上**跑 `yt-dlp` 而不是 runner：VM 到 Google 的頻寬好，而且影片檔完全不必經過 GitHub runner 的磁碟（runner 只有約 14GB 可用）。
+
+**slug 保留中文、只去掉符號**，不轉拼音。這個資料夾會出現在使用者自己的 Drive 裡，看得懂比 ASCII 安全重要——`提示詞（Prompt）設計與實作技巧` 轉成 `tishici-prompt-...` 之後，在 Drive 列表裡根本認不出是哪一支。實測 `提示詞（Prompt）設計與實作技巧` → `提示詞-Prompt-設計與實作技巧`。
+
+**連結解析與 Drive 檔案 ID 採同一個嚴格原則**：找到 0 個或 2 個以上**不同**的連結都直接失敗，絕不「取第一個」。猜錯的代價是花十幾分鐘轉錄了錯的影片，而且要看完才會發現。同一支影片被貼成 `youtu.be` 與 `watch?v=` 兩種形式視為一個，不算衝突。支援 watch / youtu.be / embed / shorts / live 五種形式。
+
+---
+
 ## 2. 產物
 
 以範例影片 `tutorial.mp4` 為例，pipeline 會在同一個 Drive 資料夾產出：
