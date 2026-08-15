@@ -193,3 +193,51 @@ class TestFindOrCreate:
 
         query = files.list_calls[0]["q"]
         assert "name = 'a\\\\b.srt'" in query
+
+
+def test_ensure_folder_reuses_an_existing_folder():
+    from psr.drive import ensure_folder
+
+    class Files:
+        def list(self, **kw):
+            self.q = kw["q"]
+            return _Exec({"files": [{"id": "existing"}]})
+        def create(self, **kw):
+            raise AssertionError("已存在同名資料夾時不該再建一個")
+
+    class _Exec:
+        def __init__(self, payload): self.payload = payload
+        def execute(self): return self.payload
+
+    class Svc:
+        def __init__(self): self._f = Files()
+        def files(self): return self._f
+
+    svc = Svc()
+    assert ensure_folder(svc, "videos", None) == "existing"
+    assert "mimeType = 'application/vnd.google-apps.folder'" in svc._f.q
+
+
+def test_ensure_folder_creates_when_missing_and_escapes_quotes():
+    from psr.drive import ensure_folder
+
+    class _Exec:
+        def __init__(self, payload): self.payload = payload
+        def execute(self): return self.payload
+
+    class Files:
+        def list(self, **kw):
+            self.q = kw["q"]
+            return _Exec({"files": []})
+        def create(self, **kw):
+            self.body = kw["body"]
+            return _Exec({"id": "new"})
+
+    class Svc:
+        def __init__(self): self._f = Files()
+        def files(self): return self._f
+
+    svc = Svc()
+    assert ensure_folder(svc, "It's a folder", "parent1") == "new"
+    assert "It\\'s a folder" in svc._f.q
+    assert svc._f.body["parents"] == ["parent1"]

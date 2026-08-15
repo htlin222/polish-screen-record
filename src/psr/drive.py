@@ -171,3 +171,29 @@ def mint_readonly_access_token(creds: Credentials) -> str:
     )
     readonly_creds.refresh(Request())
     return readonly_creds.token
+
+
+def ensure_folder(service, name: str, parent_id: str | None = None) -> str:
+    """取得（必要時建立）一個資料夾，回傳它的 id。
+
+    與 find_or_create 同樣先查再建：Drive 允許同名資料夾共存，直接 create
+    會在每次執行時多長出一個同名資料夾，而使用者只會看到一堆長得一樣的東西。
+    """
+    escaped = name.replace("\\", "\\\\").replace("'", "\\'")
+    clauses = [
+        f"name = '{escaped}'",
+        "mimeType = 'application/vnd.google-apps.folder'",
+        "trashed = false",
+    ]
+    if parent_id:
+        clauses.append(f"'{parent_id}' in parents")
+    found = service.files().list(
+        q=" and ".join(clauses), fields="files(id)", spaces="drive"
+    ).execute().get("files", [])
+    if found:
+        return found[0]["id"]
+
+    body = {"name": name, "mimeType": "application/vnd.google-apps.folder"}
+    if parent_id:
+        body["parents"] = [parent_id]
+    return service.files().create(body=body, fields="id").execute()["id"]
