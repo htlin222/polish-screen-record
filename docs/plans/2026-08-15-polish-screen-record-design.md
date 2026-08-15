@@ -78,7 +78,7 @@ tutorial.zh-Hant.srt
 | 檔案大小 | 免費 25MB / dev tier 100MB → 3 小時需切 2–3 塊 | 無限制 |
 | 可靠性 | 確定性高 | 動態配額，可能失敗 |
 
-16kHz mono MP3 @32kbps 約 14MB/小時，3 小時約 43MB，切 3 塊即可；Whisper 內部本來就重採樣到 16kHz，音質無損失。切塊點用 ffmpeg `silencedetect` 落在靜音處，每塊記錄時間偏移量。
+16kHz mono MP3 @32kbps 約 14MB/小時（2026-08-16 實測：87.2 分鐘 → **21MB**，5.6GB 影片抽音訊僅 11 秒、470x 實時）。也就是說 **100 分鐘以內的影片整支就在 Groq 免費層 25MB 上限內，完全不需要切塊**；切塊邏輯只有超過約 1.7 小時才會啟用。3 小時約 43MB，切 3 塊即可；Whisper 內部本來就重採樣到 16kHz，音質無損失。切塊點用 ffmpeg `silencedetect` 落在靜音處，每塊記錄時間偏移量。
 
 ---
 
@@ -227,6 +227,7 @@ run: uv run psr parse-issue                     # ← Python 讀 os.environ，�
 ```
 
 - 再加 `github.event.sender.login == github.repository_owner`（檢查**加 label 的人**，不是開 issue 的人）。
+- ⚠️ **必須自建 OAuth client，不能借用 gcloud 的**（2026-08-16 實測）。`gcloud auth application-default login --scopes=...drive.readonly` 會被 Google 直接封鎖：「系統已封鎖這個應用程式」。Drive 屬於敏感範圍，而 gcloud 內建的 OAuth client 未通過 Drive 的驗證。因此 Phase 2 有一段**無法自動化的前置作業**，必須在 GCP Console 手動完成：啟用 Drive API → 設定 OAuth 同意畫面（External / Testing，把自己加為測試使用者）→ 建立「桌面應用程式」類型的用戶端 ID → 下載 `client_secret.json`。之後才能跑本機授權流程換取 refresh token。ADC（`cloud-platform` 範圍）仍可繼續供 Colab CLI 使用，兩者互不影響。
 - **OAuth scope 最小組合**：`drive.readonly` + `drive.file`。`drive.file` 只涵蓋「本 app 建立或使用者明確選取」的檔案，單靠它連來源影片都讀不到；但兩者組合的結果是這個 token 在數學上無法修改或刪除任何不是它產生的檔案。
 - **Colab VM 只拿唯讀、只活一小時**（已驗證為唯一可行路徑：`colab drivemount` 在無頭環境失敗，見 §15）：runner 用 refresh token 換 access token，只把 `drive.readonly` 那個送進 VM。VM 讀影片、跑轉錄，產物由 `colab download` 拉回 runner，**上傳一律由 runner 執行**。VM 從頭到尾沒有寫入權、從沒見過 refresh token。最壞情況是洩漏一小時的唯讀存取。
 
