@@ -59,15 +59,19 @@ def _check_bounds(cues: list[Cue], audio_duration: float) -> list[str]:
 
 
 def _check_line_width(cues: list[Cue], max_width: float = 20.0) -> list[str]:
+    """逐「顯示行」量寬度，不是整條字幕。字幕可以折成兩行顯示
+    （refine.wrap_lines），限制的是每一行在螢幕上佔多寬，不是這條字幕總共
+    有幾個字。"""
     violations = []
     for c in cues:
-        width = display_width(c.text)
-        if width > max_width:
-            violations.append(f"cue {c.index}: 行寬 {width} 超過上限 {max_width}")
+        for line in c.text.split("\n"):
+            width = display_width(line)
+            if width > max_width:
+                violations.append(f"cue {c.index}: 行寬 {width} 超過上限 {max_width}")
     return violations
 
 
-def _check_duration(cues: list[Cue], min_s: float = 0.5, max_s: float = 7.0) -> list[str]:
+def _check_duration(cues: list[Cue], min_s: float = 0.5, max_s: float = 12.0) -> list[str]:
     violations = []
     for c in cues:
         duration = c.end - c.start

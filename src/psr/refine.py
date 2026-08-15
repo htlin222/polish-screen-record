@@ -1,11 +1,155 @@
 from psr.models import Word, Cue
+from psr.text import display_width
+
+
+def merge_short_cues(
+    cues: list[Cue],
+    max_width: float = 36.0,
+    max_gap: float = 0.4,
+    max_s: float = 12.0,
+    soft_min: float = 16.0,
+    hard_max: float = 46.0,
+) -> list[Cue]:
+    """把過碎的字幕往回合併，直到接近行寬上限為止。
+
+    存在理由：潤稿的 8% 編輯距離不變量只驗證「內容」，完全不管「切法」——
+    LLM 回傳 ["大","家","好"] 能完美通過檢查，因為接起來的字串一模一樣。
+    87 分鐘實片實測，模型產出的 2,425 條字幕裡有 1,338 條（55%）不到兩個
+    全形字，最短的是單個英文字母 'I'、'A'、't'。
+
+    與其在 prompt 裡跟模型爭執每行要幾個字（實測遵守度極不穩定），不如接受
+    它給的語意邊界、再用確定性的規則合併。**只合併、永不切分**，所以不會
+    製造 LLM 沒同意過的斷點，也不會動到時間軸——合併後的區間就是兩端的聯集。
+
+    合併以**標點為界**，而不是湊到字數上限。潤稿已經把標點加上去了，所以
+    標點就是天然的斷點——目標是「一條字幕 = 一個讀得完整的語句」。
+
+    兩種停止條件：
+
+      硬停：句尾標點（。！？）。一句話講完就換一條字幕。
+      軟停：逗號頓號，且累積寬度已達 soft_min。短句因此能保持完整，
+            長句則在逗號處切成長度合理的區塊，而不是硬塞進一條再折行。
+
+    另外三個上限同時成立才會合併：相鄰間隔 ≤ max_gap（跨越長靜音不合併）、
+    合併後行寬 ≤ max_width、合併後時長 ≤ max_s。
+    """
+    if not cues:
+        return []
+    out = [cues[0]]
+    for cue in cues[1:]:
+        prev = out[-1]
+        joined = prev.text + cue.text
+        # 寬度上限卡住時就地停下，會把斷點留在詞中間（實測切出「…一個聊天」／
+        # 「的界面…」）或留下「那」「你就會」這種孤兒字幕。所以尚未走到任何
+        # 標點時放寬到 hard_max，讓它有機會走到自然斷點——一條稍寬的字幕，
+        # 遠比一個斷在詞中間的字幕好讀。
+        width_ok = display_width(joined) <= max_width or (
+            not _at_punctuation(prev.text) and display_width(joined) <= hard_max
+        )
+        if (
+            not _should_stop(prev.text, soft_min)
+            and cue.start - prev.end <= max_gap
+            and width_ok
+            and cue.end - prev.start <= max_s
+        ):
+            out[-1] = Cue(index=prev.index, start=prev.start, end=cue.end, text=joined)
+        else:
+            out.append(cue)
+    return _reindex(out)
+
+
+_SENTENCE_END = "。！？!?…"
+_LEADING_JUNK = "，,、；;：:。！？!?"
+_WRAP_PREFERRED = "，,、；;：:"
+
+
+def strip_leading_punctuation(cues: list[Cue]) -> list[Cue]:
+    """刪掉字幕開頭的孤兒標點。
+
+    講者在句中長停頓時，潤稿的斷點會落在逗號前，而合併因為間隔太大不會跨越
+    那個停頓，於是下一條字幕以「，」開頭。實測：「大家好，我是林協廷醫師」／
+    「，今天這堂課是……」。
+    """
+    return _reindex([
+        Cue(index=c.index, start=c.start, end=c.end, text=c.text.lstrip(_LEADING_JUNK).lstrip())
+        for c in cues
+    ])
+
+
+def wrap_lines(cues: list[Cue], max_width: float = 18.0) -> list[Cue]:
+    """把過寬的字幕折成兩行顯示（插入換行字元），**不改動時間軸**。
+
+    這是「語句完整」與「單行可讀」之間的解法：合併階段以句尾標點為界、讓
+    一條字幕裝下一個完整語句，寬度上限放寬到 36；顯示時再折行，而不是在
+    合併階段為了湊 20 個字把句子切在詞中間（實測會切出「聊」／「天」、
+    「樣」／「子」這種斷點）。
+
+    折行點優先選逗號頓號之後——那是語句內的自然停頓；沒有的話取中點附近。
+    """
+    out: list[Cue] = []
+    for cue in cues:
+        text = cue.text
+        if display_width(text) <= max_width or "\n" in text:
+            out.append(cue)
+            continue
+        out.append(Cue(index=cue.index, start=cue.start, end=cue.end, text=_wrap(text)))
+    return out
+
+
+_WRAP_TARGET = 20.0
+
+
+def _wrap(text: str) -> str:
+    half = display_width(text) / 2
+    best, best_dist = None, None
+    acc = 0.0
+    for i, ch in enumerate(text):
+        acc += display_width(ch)
+        if ch in _WRAP_PREFERRED:
+            dist = abs(acc - half)
+            if best_dist is None or dist < best_dist:
+                best, best_dist = i + 1, dist
+    if best is None:                      # 沒有標點可用就取中點
+        acc = 0.0
+        for i, ch in enumerate(text):
+            acc += display_width(ch)
+            if acc >= half:
+                best = i + 1
+                break
+    if not best or best >= len(text):
+        return text
+    left, right = text[:best], text[best:]
+    # 對折一次還是太寬時再折一次（46 字對折是 23 字，仍超過單行 20 的上限）。
+    # 上限三行——再多就不是字幕而是段落了。
+    if display_width(right) > _WRAP_TARGET and "\n" not in right:
+        right = _wrap(right)
+    return left + "\n" + right
+
+
+def _at_punctuation(text: str) -> bool:
+    """這段文字是不是剛好停在某個標點上？不是的話，斷在這裡就是斷在詞中間。"""
+    return bool(text) and text.rstrip()[-1:] in (_SENTENCE_END + _WRAP_PREFERRED)
+
+
+def _should_stop(text: str, soft_min: float) -> bool:
+    """這段文字是否該就此結束、不再往後合併？
+
+    句尾標點一律停。逗號頓號只有在累積長度已經夠讀時才停——太早就在逗號斷，
+    會切出「那我想，」這種讀不完整的半句。
+    """
+    tail = text.rstrip()[-1:]
+    if not tail:
+        return False
+    if tail in _SENTENCE_END:
+        return True
+    return tail in _WRAP_PREFERRED and display_width(text) >= soft_min
 
 
 def enforce_duration(
     cues: list[Cue],
     words: list[Word],
     min_s: float = 0.5,
-    max_s: float = 7.0,
+    max_s: float = 12.0,
     audio_duration: float | None = None,
 ) -> list[Cue]:
     """修正字幕時長：太長的在字間最大間隔處遞迴切開；太短的往後延或向鄰居

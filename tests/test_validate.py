@@ -65,8 +65,16 @@ def test_duration_fail_too_short():
 
 
 def test_duration_fail_too_long():
-    cues = [Cue(1, 0.0, 8.0, "A")]
+    # 上限從 7 秒放寬到 12 秒：講課語速慢，一個完整句子常需 8-10 秒，
+    # 為了守 7 秒而把句子切在詞中間是本末倒置。
+    cues = [Cue(1, 0.0, 15.0, "A")]
     assert _check_duration(cues) != []
+
+
+def test_duration_allows_a_long_sentence():
+    # 8 秒的字幕在放寬前會被判違規，導致整窗降級。實測講課語速下，
+    # 一個完整句子常落在 8-10 秒。
+    assert _check_duration([Cue(1, 0.0, 8.0, "一個完整的句子")]) == []
 
 
 def test_reading_speed_pass():
