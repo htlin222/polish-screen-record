@@ -77,6 +77,14 @@ jobs:
           GROQ_API_KEY: ${{ secrets.GROQ_API_KEY }}
         run: uv run psr run --report report.md
 
+      - name: 回收 Colab session
+        # 縱深防禦：程式碼裡已有 try/finally，但 job 被取消或 runner 被殺時
+        # 那段不會執行。留下的孤兒 runtime 會佔用免費層配額，累積到最後
+        # 每一次執行都會拿到 TooManyAssignmentsError。
+        if: always()
+        continue-on-error: true
+        run: colab --auth adc stop -s psr || true
+
       - name: 回報結果
         if: always()
         env:

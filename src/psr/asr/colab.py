@@ -53,11 +53,16 @@ def transcribe(source_kind, source_id, access_token, whisper_prompt,
     if shutil.which("colab") is None:
         raise ColabUnavailable("找不到 colab CLI")
 
-    r = _colab("new", "-s", session, "--gpu", "T4", timeout=600)
-    if r.returncode != 0:
-        raise ColabUnavailable(f"無法配置 T4：{_tail(r.stderr or r.stdout)}")
+    # 先回收同名的殘留 session。Colab 免費層對同時配置的 runtime 有上限，
+    # 超過就是 TooManyAssignmentsError——實測第一次 CI 執行正是這樣掛的。
+    # 孤兒不會自己消失得夠快，累積下去會讓之後每一次執行都拿不到 GPU。
+    _colab("stop", "-s", session, timeout=120)
 
     try:
+        r = _colab("new", "-s", session, "--gpu", "T4", timeout=600)
+        if r.returncode != 0:
+            raise ColabUnavailable(f"無法配置 T4：{_tail(r.stderr or r.stdout)}")
+
         with tempfile.TemporaryDirectory() as tmp:
             job = pathlib.Path(tmp) / "job.json"
             job.write_text(json.dumps({
