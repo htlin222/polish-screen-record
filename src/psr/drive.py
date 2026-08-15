@@ -1,0 +1,173 @@
+import json
+from dataclasses import dataclass, field
+
+from google.auth.transport.requests import Request
+from google.oauth2.credentials import Credentials
+from googleapiclient.http import MediaFileUpload, MediaIoBaseDownload
+
+# 設計文件 §10：drive.readonly 讓 token 讀得到使用者能看到的任何檔案（包含
+# 既有的 mp4）；drive.file 只涵蓋「本 app 建立或使用者明確選取」的檔案。
+# 單靠 drive.file 連來源影片都讀不到（實測：完全看不到既有 mp4）；兩者組合
+# 起來，這個 token 在數學上無法修改或刪除任何不是它產生的檔案。
+SCOPE_READONLY = "https://www.googleapis.com/auth/drive.readonly"
+SCOPE_FILE = "https://www.googleapis.com/auth/drive.file"
+SCOPES = [SCOPE_READONLY, SCOPE_FILE]
+
+# 設計文件 §1：影片大小上限 8 GB，preflight 超過直接拒絕。
+MAX_VIDEO_SIZE_BYTES = 8 * 1024**3
+
+# 多 GB 影片要串流下載，不能整包進記憶體；chunk 大小取 64MB。
+_DOWNLOAD_CHUNK_SIZE = 64 * 1024 * 1024
+
+_PREFLIGHT_FIELDS = "id,name,mimeType,size,md5Checksum,parents"
+
+
+class DriveError(ValueError):
+    """Drive 層操作失敗。訊息會原樣貼回 issue 留言，所以要寫得像給人看的。"""
+
+
+class PreflightError(DriveError):
+    """preflight 檢查未通過（非影片、超過大小上限等）。"""
+
+
+@dataclass(frozen=True, slots=True)
+class FileInfo:
+    """`files().get()` 回傳的精簡 metadata。
+
+    md5Checksum 是整條 pipeline 的內容定址指紋（§3），且**不需下載任何一個
+    位元組**就拿得到——實測在 5.98 GB 檔案上零傳輸取得。這裡把它當一等公民
+    欄位放在最前面附近，避免呼叫端忘記它的存在而去重新下載算 hash。
+    """
+    id: str
+    name: str
+    mime_type: str
+    size: int
+    md5_checksum: str
+    parents: list[str] = field(default_factory=list)
+
+
+@dataclass(frozen=True, slots=True)
+class FileMeta:
+    """`find_or_create` 的回傳值：寫入（新建或更新）後的檔案身份。"""
+    id: str
+    name: str
+    web_view_link: str | None = None
+
+
+def load_credentials(token_json: str) -> Credentials:
+    """從 JSON 字串載入使用者 OAuth token。
+
+    刻意接受字串而非檔案路徑：CI 環境沒有穩定的本機檔案系統可以放憑證，
+    但可以把整份 JSON 存進一個 GitHub Secret、經環境變數傳進來。scopes 固定
+    為 drive.readonly + drive.file 這一組（見上方常數的說明）。
+    """
+    info = json.loads(token_json)
+    return Credentials.from_authorized_user_info(info, scopes=SCOPES)
+
+
+def preflight(service, file_id: str) -> FileInfo:
+    """跑完整條 pipeline 前的守門檢查：只呼叫一次 `files().get()`，
+    不傳輸任何影片資料就驗證 mimeType 與大小是否合法（設計文件 §12）。
+    """
+    meta = service.files().get(fileId=file_id, fields=_PREFLIGHT_FIELDS).execute()
+
+    mime_type = meta.get("mimeType", "")
+    if not mime_type.startswith("video/"):
+        raise PreflightError(
+            f"{meta.get('name', file_id)} 不是影片檔（mimeType={mime_type!r}），拒絕處理。"
+        )
+
+    size = int(meta.get("size", 0))
+    if size > MAX_VIDEO_SIZE_BYTES:
+        raise PreflightError(
+            f"{meta.get('name', file_id)} 大小 {size / 1024**3:.2f} GB 超過 8 GB 上限，拒絕處理。"
+        )
+
+    return FileInfo(
+        id=meta["id"],
+        name=meta["name"],
+        mime_type=mime_type,
+        size=size,
+        md5_checksum=meta.get("md5Checksum", ""),
+        parents=list(meta.get("parents", [])),
+    )
+
+
+def _escape_query_value(name: str) -> str:
+    """Drive `files().list()` 的 `q` 參數是一段小型查詢語言，字串常值用單引號
+    包住。反斜線必須先跳脫，否則接著跳脫單引號時產生的反斜線會被誤認成
+    使用者原本輸入的一部分而重複跳脫。"""
+    return name.replace("\\", "\\\\").replace("'", "\\'")
+
+
+def find_or_create(service, name: str, folder_id: str, local_path: str, mime_type: str) -> FileMeta:
+    """把 `local_path` 的內容寫成 Drive 裡名為 `name`（位於 `folder_id`）的檔案，
+    冪等：同名檔案已存在就 update（產生新 revision，舊版仍可還原），
+    否則才 create。
+
+    Drive 允許同一資料夾內有同名檔案，`files().create()` 每次都無條件建立新檔
+    ——三次重跑會留下三個同名 SRT、三個不同的 webViewLink（設計文件 §11）。
+    """
+    escaped_name = _escape_query_value(name)
+    query = f"name = '{escaped_name}' and '{folder_id}' in parents and trashed = false"
+    response = (
+        service.files()
+        .list(q=query, fields="files(id,name,webViewLink)", spaces="drive")
+        .execute()
+    )
+    matches = response.get("files", [])
+
+    media = MediaFileUpload(local_path, mimetype=mime_type, resumable=True)
+
+    if matches:
+        file_id = matches[0]["id"]
+        result = (
+            service.files()
+            .update(fileId=file_id, media_body=media, fields="id,name,webViewLink")
+            .execute()
+        )
+    else:
+        body = {"name": name, "parents": [folder_id]}
+        result = (
+            service.files()
+            .create(body=body, media_body=media, fields="id,name,webViewLink")
+            .execute()
+        )
+
+    return FileMeta(
+        id=result["id"],
+        name=result.get("name", name),
+        web_view_link=result.get("webViewLink"),
+    )
+
+
+def download(service, file_id: str, dest_path: str) -> None:
+    """把 `file_id` 的內容串流下載到 `dest_path`。用 chunked
+    `MediaIoBaseDownload`，讓多 GB 的影片邊下載邊寫檔，而不是整包灌進記憶體。
+    """
+    request = service.files().get_media(fileId=file_id)
+    with open(dest_path, "wb") as fh:
+        downloader = MediaIoBaseDownload(fh, request, chunksize=_DOWNLOAD_CHUNK_SIZE)
+        done = False
+        while not done:
+            _status, done = downloader.next_chunk()
+
+
+def mint_readonly_access_token(creds: Credentials) -> str:
+    """換發一個只帶 drive.readonly 範圍的裸 access token，交給 Colab VM。
+
+    設計文件 §10：VM 只活一小時、只拿唯讀，**從頭到尾不能看見 refresh
+    token**——上傳一律由 runner 執行。做法是另外組一個只含唯讀 scope 的
+    Credentials 物件並 refresh 它，回傳的字串本身就不帶 refresh_token，
+    交出去之後 VM 沒有任何管道換到更長效或更高權限的憑證。
+    """
+    readonly_creds = Credentials(
+        token=None,
+        refresh_token=creds.refresh_token,
+        token_uri=creds.token_uri,
+        client_id=creds.client_id,
+        client_secret=creds.client_secret,
+        scopes=[SCOPE_READONLY],
+    )
+    readonly_creds.refresh(Request())
+    return readonly_creds.token
