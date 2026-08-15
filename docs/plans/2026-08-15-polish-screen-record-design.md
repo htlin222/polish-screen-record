@@ -96,8 +96,17 @@ Colab VM 不能跑 Docker，兩邊無法共用 image；改用同一份 `scripts/
 | Python 依賴 | `uv sync --frozen`（uv.lock 進版控） |
 | 模型權重 | HF revision SHA，不是 main，不是 tag |
 | CTranslate2 / compute_type | 明確釘 float16 |
+| `google-colab-cli` 的依賴 | **必須釘 `jupyter-kernel-client==0.15.0`** |
 
 GPU 型號寫進 manifest（不影響 key，但除錯時需要）。
+
+⚠️ **`google-colab-cli` 上游宣告的是 `Requires-Dist: jupyter-kernel-client`，完全沒鎖版本。** 該套件 1.0.0 把 `KernelClient` 改名為 `JupyterKernelClient`，導致 CLI 一執行就 `AttributeError` 而完全無法使用。安裝時必須：
+
+```bash
+uv tool install google-colab-cli --with "jupyter-kernel-client==0.15.0"
+```
+
+這件事在 Phase 0 spike 當場踩到（見 §15）。它同時是本節存在理由的最佳示範：**沒鎖版本的依賴不是「將來可能出問題」，是「上游隨時可以讓你的 pipeline 停止運作」**。
 
 ### 鎖 2：解碼參數
 
@@ -201,7 +210,7 @@ run: uv run psr parse-issue                     # ← Python 讀 os.environ，�
 
 - 再加 `github.event.sender.login == github.repository_owner`（檢查**加 label 的人**，不是開 issue 的人）。
 - **OAuth scope 最小組合**：`drive.readonly` + `drive.file`。`drive.file` 只涵蓋「本 app 建立或使用者明確選取」的檔案，單靠它連來源影片都讀不到；但兩者組合的結果是這個 token 在數學上無法修改或刪除任何不是它產生的檔案。
-- **Colab VM 只拿唯讀、只活一小時**：runner 用 refresh token 換 access token，只把 `drive.readonly` 那個送進 VM。VM 讀影片、跑轉錄，產物由 `colab download` 拉回 runner，**上傳一律由 runner 執行**。VM 從頭到尾沒有寫入權、從沒見過 refresh token。最壞情況是洩漏一小時的唯讀存取。
+- **Colab VM 只拿唯讀、只活一小時**（已驗證為唯一可行路徑：`colab drivemount` 在無頭環境失敗，見 §15）：runner 用 refresh token 換 access token，只把 `drive.readonly` 那個送進 VM。VM 讀影片、跑轉錄，產物由 `colab download` 拉回 runner，**上傳一律由 runner 執行**。VM 從頭到尾沒有寫入權、從沒見過 refresh token。最壞情況是洩漏一小時的唯讀存取。
 
 ---
 
@@ -301,7 +310,41 @@ terms:
 4. `uv tool install google-colab-cli`，執行 `colab exec --gpu T4 -f hello.py`。
 5. 判準：能配置到 T4、`nvidia-smi` 有輸出、`colab download` 能取回檔案。
 
-**未解的未知數（明確標示）**：Colab API 是否接受消費者 Gmail 帳號的 ADC。ADC 使用者憑證通常需要設 quota project，而免費 Colab 額度綁在消費者帳號上；官方零 CI 文件。這正是它是 spike 而非 task 的原因。**若 spike 失敗**：Colab 退成本機手動執行，主路徑自動變成 Groq，Phase 1–4 的成果完全不受影響。
+### Phase 0 spike 結果（2026-08-15，已驗證）
+
+**結論：通過。** 原先標為「未解未知數」的問題——Colab API 是否接受消費者 Gmail 帳號的 ADC——答案是**接受**。`gcloud auth application-default login` 產生的憑證直接可用，**quota project 的 WARNING 無害**，不需要 `set-quota-project`。
+
+實測輸出：
+
+```
+$ colab --auth adc run --gpu T4 --timeout 300 spike.py
+[colab] Creating session 'run-7feaf7'...
+[colab] Session READY (run-7feaf7). Executing spike.py...
+SPIKE_OK python: 3.12.13
+GPU: Tesla T4, 15360 MiB, 580.82.07
+ffmpeg: /usr/bin/ffmpeg
+disk_free_GB: 65.6
+[colab] Stopping session 'run-7feaf7'...
+real 0m19.8s
+```
+
+| 項目 | 實測值 | 對設計的影響 |
+| --- | --- | --- |
+| 配置 + 執行 + 釋放總耗時 | **19.8 秒** | 開關 VM 的成本可忽略 |
+| GPU | Tesla T4 16GB | 足夠跑 large-v3 float16 |
+| VM 磁碟可用 | 65.6 GB | 8GB 影片 + 音訊綽綽有餘 |
+| ffmpeg | **VM 預裝** `/usr/bin/ffmpeg` | 但仍須用 bootstrap 釘選版本，見鎖 1 |
+| VM Python | 3.12.13 | 與 runner 的 3.11 不同，`remote_job.py` 須相容兩者 |
+
+**採用 `colab run` 而非 `new` + `exec` + `stop`。** 它在全新 VM 執行腳本後自動釋放，正是 CI 要的原語。⚠️ **`--timeout` 預設只有 30 秒**，轉錄務必顯式加大。
+
+**`--auth` 預設是 `oauth2` 不是 `adc`**，CI 中必須顯式指定 `--auth adc`。
+
+**`drivemount` 實測不可用於無頭環境**（`ValueError: mount failed`，需要互動式 OAuth）。因此 §10 的設計——runner 換發唯讀 access token 送進 VM、由 VM 以 Drive API 下載——不只是較安全的選擇，而是**唯一可行的選擇**。此點已從假設升級為驗證事實。
+
+**仍未驗證**：以上皆為本機執行。GitHub Actions 無頭環境需再確認 base64 還原的 ADC 檔搭配 `GOOGLE_APPLICATION_CREDENTIALS` 可正常運作。風險已大幅降低，但尚未證明。
+
+**若 CI 環節失敗**：Colab 退成本機手動執行，主路徑自動變成 Groq，Phase 1–4 的成果完全不受影響。
 
 ---
 
