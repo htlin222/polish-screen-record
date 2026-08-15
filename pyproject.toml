@@ -4,6 +4,8 @@ version = "0.1.0"
 description = "polish-screen-record: pure-function core for SRT rendering, alignment, and validation"
 requires-python = ">=3.11"
 dependencies = [
+    "google-api-python-client>=2.198.0",
+    "google-auth-oauthlib>=1.4.0",
     "groq>=1.6.0",
     "zhconv>=1.4.3",
 ]

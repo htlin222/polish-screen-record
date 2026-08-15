@@ -13,7 +13,6 @@ def validate(cues: list[Cue], audio_duration: float) -> list[str]:
     violations.extend(_check_line_width(cues))
     violations.extend(_check_duration(cues))
     violations.extend(_check_reading_speed(cues))
-    violations.extend(_check_english_tokens_intact(cues))
     violations.extend(_check_contiguous_indices(cues))
     return violations
 
@@ -93,22 +92,20 @@ def _check_reading_speed(cues: list[Cue], max_speed: float = 9.0) -> list[str]:
     return violations
 
 
-def _check_english_tokens_intact(cues: list[Cue]) -> list[str]:
-    """檢查英文 token（連續英文字母數字）沒有被斷行硬生生切一半：
-    如果一行的結尾是英文字母/數字，而下一行的開頭也是英文字母/數字，
-    代表同一個英文單字被拆到兩行去了。"""
-    violations = []
-    for a, b in zip(cues, cues[1:]):
-        if (
-            a.text and b.text
-            and a.text[-1].isascii() and a.text[-1].isalnum()
-            and b.text[0].isascii() and b.text[0].isalnum()
-        ):
-            violations.append(
-                f"cue {a.index} 與 cue {b.index}: 英文 token 疑似被斷行切開"
-                f"（'...{a.text[-4:]}' | '{b.text[:4]}...'）"
-            )
-    return violations
+# 「英文 token 不可被斷行切開」這條規則曾實作於此，已移除。
+#
+# 它只看得到字幕文字，而「原本這裡有沒有空格」在渲染時就被吃掉了，因此在原理上
+# 分不出「把 prompt 劈成 prom|pt」與「在 early|breast 兩個獨立單字之間斷行」。
+# 87 分鐘實片實測：修正 segment.raw_segment 之前 116 個違規多為真，修正之後
+# 剩下的 49 個經逐條檢視全是合法斷行的誤報。留著它等於每支影片的每個窗口都會
+# 因假違規而降級，系統直接不可用。
+#
+# 這個性質改由建構層保證：segment._split_without_breaking_ascii 在斷行會切開
+# 連續 ASCII 英數串時，退回到該串的起點。align 路徑用的是 LLM 輸出的文字，
+# 空格由 LLM 自己維持。
+#
+# 已知殘留：Whisper 偶爾在縮寫內插入空格（實測 'T' / ' N' / 'BC' → TNBC），
+# 這是轉錄層的假詞界，建構層看到空格就認定可以斷。應由潤稿階段修正。
 
 
 def _check_contiguous_indices(cues: list[Cue]) -> list[str]:

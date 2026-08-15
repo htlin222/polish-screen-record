@@ -36,29 +36,57 @@ def raw_segment(words: list[Word], max_width: float = 20.0, max_gap: float = 0.6
 
     cues: list[Cue] = []
     current_words: list[Word] = [words[0]]
-    current_text = words[0].text
 
     for word in words[1:]:
         gap = word.start - current_words[-1].end
-        candidate_text = current_text + word.text
-        candidate_width = display_width(candidate_text)
+        candidate_text = "".join(w.text for w in current_words) + word.text
 
-        if candidate_width > max_width or gap > max_gap:
-            cues.append(_flush(cues, current_words, current_text))
-            current_words = [word]
-            current_text = word.text
+        if display_width(candidate_text) > max_width or gap > max_gap:
+            head, carry = _split_without_breaking_ascii(current_words, word)
+            cues.append(_flush(cues, head))
+            current_words = carry + [word]
         else:
             current_words.append(word)
-            current_text = candidate_text
 
-    cues.append(_flush(cues, current_words, current_text))
+    cues.append(_flush(cues, current_words))
     return cues
 
 
-def _flush(cues: list[Cue], words_in_cue: list[Word], text: str) -> Cue:
+def _splits_ascii_run(left: str, right: str) -> bool:
+    """在 left 與 right 之間斷開，是否會切斷一個連續的 ASCII 英數串？"""
+    return bool(left) and bool(right) \
+        and left[-1].isascii() and left[-1].isalnum() \
+        and right[0].isascii() and right[0].isalnum()
+
+
+def _split_without_breaking_ascii(
+    current: list[Word], nxt: Word
+) -> tuple[list[Word], list[Word]]:
+    """決定 current 這條字幕實際該在哪裡結束。
+
+    Whisper 把英文輸出成 BPE 子詞片段——實測 'prompt' 是 ['prom','pt']、
+    'Agent' 是 ['A','gent']、'2026' 是 ['20','26']。逐 word 累積再依寬度斷行，
+    就會產生「...好的prom」／「pt」這種把英文單字劈成兩半的字幕。實測 87 分鐘
+    的教學影片有 116 處。
+
+    因此斷點若會切開一段連續的 ASCII 英數串，就往回退到該串的起點，把整串
+    移到下一條字幕。整條字幕本身就是一整串英文時（退無可退）才照原樣斷開。
+    """
+    if not _splits_ascii_run(current[-1].text, nxt.text):
+        return current, []
+
+    i = len(current) - 1
+    while i > 0 and _splits_ascii_run(current[i - 1].text, current[i].text):
+        i -= 1
+    if i == 0:
+        return current, []          # 整條都是同一串，退無可退
+    return current[:i], current[i:]
+
+
+def _flush(cues: list[Cue], words_in_cue: list[Word]) -> Cue:
     return Cue(
         index=len(cues) + 1,
         start=words_in_cue[0].start,
         end=words_in_cue[-1].end,
-        text=clean_text(text),
+        text=clean_text("".join(w.text for w in words_in_cue)),
     )

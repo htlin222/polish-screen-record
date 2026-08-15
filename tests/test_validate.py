@@ -7,7 +7,6 @@ from psr.validate import (
     _check_line_width,
     _check_duration,
     _check_reading_speed,
-    _check_english_tokens_intact,
     _check_contiguous_indices,
 )
 
@@ -78,16 +77,6 @@ def test_reading_speed_pass():
 def test_reading_speed_fail():
     cues = [Cue(1, 0.0, 1.0, "你" * 10)]  # 10 全形字 / 1 秒 = 10 > 9
     assert _check_reading_speed(cues) != []
-
-
-def test_english_tokens_intact_pass():
-    cues = [Cue(1, 0.0, 1.0, "你好 Python"), Cue(2, 1.0, 2.0, "很棒")]
-    assert _check_english_tokens_intact(cues) == []
-
-
-def test_english_tokens_intact_fail():
-    cues = [Cue(1, 0.0, 1.0, "安裝 Pyth"), Cue(2, 1.0, 2.0, "on 很簡單")]
-    assert _check_english_tokens_intact(cues) != []
 
 
 def test_contiguous_indices_pass():

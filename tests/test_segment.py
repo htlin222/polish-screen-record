@@ -45,3 +45,25 @@ def test_raw_segment_strips_whisper_leading_spaces():
              Word(" 來", 0.6, 0.9), Word("個", 0.9, 1.1)]
     cues = raw_segment(words)
     assert " " not in cues[0].text, f"字幕殘留空格：{cues[0].text!r}"
+
+
+def test_raw_segment_never_splits_whisper_bpe_english_pieces():
+    # Whisper 把英文輸出成 BPE 子詞片段：'prompt' → ['prom','pt']。
+    # 逐 word 依寬度斷行會產生「...好的prom」／「pt」這種劈半的字幕。
+    words = [Word("一", 0.0, 0.2), Word("個", 0.2, 0.4), Word("好", 0.4, 0.6),
+             Word("的", 0.6, 0.8), Word("prom", 0.8, 1.2), Word("pt", 1.2, 1.4),
+             Word("很", 1.4, 1.6), Word("重", 1.6, 1.8), Word("要", 1.8, 2.0)]
+    cues = raw_segment(words, max_width=5.0)
+    joined = "".join(c.text for c in cues)
+    assert "prompt" in joined.replace(" ", ""), f"英文被切散：{[c.text for c in cues]}"
+    for a, b in zip(cues, cues[1:]):
+        assert not (a.text[-1].isascii() and a.text[-1].isalnum()
+                    and b.text[0].isascii() and b.text[0].isalnum()), \
+            f"斷行切開英文：{a.text!r} | {b.text!r}"
+
+
+def test_raw_segment_breaks_anyway_when_whole_cue_is_one_ascii_run():
+    # 退無可退時照原樣斷開，不能無限累積
+    words = [Word("abcd", 0.0, 0.2), Word("efgh", 0.2, 0.4), Word("ijkl", 0.4, 0.6)]
+    cues = raw_segment(words, max_width=3.0)
+    assert len(cues) >= 2
