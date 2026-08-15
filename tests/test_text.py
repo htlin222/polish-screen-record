@@ -45,3 +45,38 @@ def test_display_width_pure_latin():
 
 def test_display_width_mixed():
     assert display_width("Python你好") == 5.0
+
+
+def test_to_traditional_converts_glyphs_only():
+    from psr.text import to_traditional
+    # 只轉字形，不轉詞彙——詞彙層的台灣化是 glossary.yml 的職責
+    assert to_traditional("软件工程师写程序") == "軟件工程師寫程序"
+    assert to_traditional("网络和数据库") == "網絡和數據庫"
+    assert to_traditional("这个视频的内存优化") == "這個視頻的內存優化"
+
+
+def test_to_traditional_is_identity_on_traditional_text():
+    from psr.text import to_traditional
+    s = "這一句本來就是繁體，不該被動到"
+    assert to_traditional(s) == s
+
+
+def test_to_traditional_is_idempotent():
+    # 確定性的最低要求：轉兩次跟轉一次一樣
+    from psr.text import to_traditional
+    s = "混合：我们說的软件跟我們講的軟體"
+    once = to_traditional(s)
+    assert to_traditional(once) == once
+
+
+def test_to_traditional_leaves_english_alone():
+    from psr.text import to_traditional
+    assert to_traditional("用 Python 寫 prompt") == "用 Python 寫 prompt"
+
+
+def test_to_traditional_does_not_rewrite_natural_taiwanese_wording():
+    # s2twp 會把「打開」改成「開啟」、「權限」改成「許可權」。逐字稿是轉錄，
+    # 不是在地化——改寫講者實際說出口的詞是越權，所以刻意只用 s2tw。
+    from psr.text import to_traditional
+    assert to_traditional("首先打開終端機") == "首先打開終端機"
+    assert to_traditional("你沒有權限") == "你沒有權限"

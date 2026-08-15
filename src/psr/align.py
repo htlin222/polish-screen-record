@@ -2,7 +2,7 @@ import bisect
 import difflib
 
 from psr.models import Cue, Word
-from psr.text import normalize
+from psr.text import normalize, to_traditional
 
 
 def word_stream(words: list[Word]) -> tuple[str, list[int]]:
@@ -216,6 +216,8 @@ def align(words: list[Word], lines: list[str]) -> list[Cue] | None:
         if not start < end:
             return None
 
-        cues.append(Cue(index=line_idx + 1, start=start, end=end, text=line))
+        # 繁化在這裡做而不是交給潤稿 prompt：查表轉換是確定性的，LLM 不是。
+        # 對已是繁體的文字是恆等操作，所以即使潤稿已經輸出繁體也無害。
+        cues.append(Cue(index=line_idx + 1, start=start, end=end, text=to_traditional(line)))
 
     return cues

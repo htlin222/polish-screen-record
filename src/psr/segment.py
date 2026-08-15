@@ -2,7 +2,7 @@ import re
 import unicodedata
 
 from psr.models import Word, Cue
-from psr.text import display_width
+from psr.text import display_width, to_traditional
 
 # 兩個東亞寬字元之間的空白。Whisper 的中文 word token 會帶前導空格
 # （實測 ' 來'），直接串接會讓字幕出現「導演 來個特寫」這種夾雜空格的結果。
@@ -17,8 +17,12 @@ def _is_wide(ch: str) -> bool:
 
 def clean_text(text: str) -> str:
     """整理串接 word 後的字幕文字：收斂連續空白、刪除中日韓字元之間的空白、
-    去除頭尾空白。"""
-    text = _CJK_SPACE.sub(lambda m: " ", text).strip()
+    去除頭尾空白，並統一成繁體中文（台灣用語）。
+
+    Whisper 對中文會在同一份逐字稿裡混輸繁簡（實測「我们说」與「我們就會」
+    並存），所以繁化不能只靠潤稿 prompt——降級路徑根本不經過 LLM。放在這裡
+    才能保證**兩條路徑的輸出都是繁體**。"""
+    text = to_traditional(_CJK_SPACE.sub(lambda m: " ", text).strip())
     out: list[str] = []
     for i, ch in enumerate(text):
         if ch == " " and 0 < i < len(text) - 1 and _is_wide(text[i - 1]) and _is_wide(text[i + 1]):
