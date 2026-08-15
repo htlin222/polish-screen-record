@@ -82,10 +82,20 @@ def _map_one_boundary(opcodes, b: int) -> int | None:
 
 
 def has_anchor(opcodes, orig_lo: int, orig_hi: int, min_len: int = 4) -> bool:
-    """檢查 [orig_lo, orig_hi) 這段原始字元區間內，是否至少有一個長度 >= min_len
-    的 equal 區塊與它重疊。這是防止「斷點映射得到值」但「這段內容其實已經
+    """檢查 [orig_lo, orig_hi) 這段原始字元區間內，是否至少有一個夠長的
+    equal 區塊與它重疊。這是防止「斷點映射得到值」但「這段內容其實已經
     面目全非」的防線——map_boundaries 只保證吸附得到一個位置，不保證那個
-    位置附近的內容真的還能在原文裡找到對應。"""
+    位置附近的內容真的還能在原文裡找到對應。
+
+    要求的長度會**隨跨度縮小**：跨度只有 2 個字元時，不可能容納 4 個字元的
+    錨點，硬要求 4 就是要求一件做不到的事。實測後果嚴重——一份逐字完全相同
+    的潤稿，只因為其中一行是「好的」這種兩字短句，整個窗口就被判定失敗而
+    降級。87 分鐘實片有 7/14 個窗口是這樣掉的。
+    """
+    required = min(min_len, orig_hi - orig_lo)
+    if required <= 0:
+        return False
+    min_len = required
     for tag, i1, i2, j1, j2 in opcodes:
         if tag != "equal":
             continue

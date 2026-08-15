@@ -90,3 +90,22 @@ def test_align_spans_full_audio_when_lines_cover_everything():
     assert cues is not None
     assert cues[0].start == words[0].start
     assert cues[-1].end == words[-1].end
+
+
+def test_align_accepts_lines_shorter_than_the_anchor_length():
+    # 迴歸測試：一份逐字完全相同的潤稿，只因為其中一行是「好的」這種兩字
+    # 短句，就因為裝不下 4 字錨點而讓整個窗口降級。錨點要求必須隨跨度縮小。
+    words = [Word("今天我們", 0.0, 2.0), Word("先來安裝", 2.0, 4.0),
+             Word("好的", 4.0, 5.0), Word("這邊要注意", 5.0, 8.0)]
+    lines = ["今天我們先來安裝", "好的", "這邊要注意"]
+
+    cues = align(words, lines)
+    assert cues is not None, "逐字相同的潤稿不該降級"
+    assert [c.text for c in cues] == lines
+
+
+def test_align_still_rejects_a_short_line_that_does_not_match():
+    words = [Word("今天我們", 0.0, 2.0), Word("先來安裝", 2.0, 4.0),
+             Word("好的", 4.0, 5.0), Word("這邊要注意", 5.0, 8.0)]
+    # 中間換成完全無關的兩個字，仍必須降級——放寬錨點長度不等於放棄檢查
+    assert align(words, ["今天我們先來安裝", "貓咪", "這邊要注意"]) is None

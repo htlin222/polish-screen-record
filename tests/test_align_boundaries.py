@@ -37,9 +37,18 @@ def test_has_anchor_overlap_exactly_min_len_is_true():
     assert has_anchor(opcodes, 0, 4, min_len=4) is True
 
 
-def test_has_anchor_overlap_one_below_min_len_is_false():
+def test_has_anchor_partial_overlap_below_min_len_is_false():
+    # 跨度夠長（10 字元），但唯一的 equal 區塊只涵蓋其中 3 個 —— 錨點不足。
+    # 這才是這條規則要擋的情況：內容大體上已經對不上原文了。
+    opcodes = [("equal", 0, 3, 0, 3), ("replace", 3, 10, 3, 10)]
+    assert has_anchor(opcodes, 0, 10, min_len=4) is False
+
+
+def test_has_anchor_requirement_shrinks_to_fit_a_short_span():
+    # 跨度只有 3 個字元時，不可能容納 4 字元的錨點。完全吻合就該算通過，
+    # 否則「好的」這種兩字短句永遠無法錨定，一份逐字相同的潤稿也會被判失敗。
     opcodes = [("equal", 0, 3, 0, 3)]
-    assert has_anchor(opcodes, 0, 3, min_len=4) is False
+    assert has_anchor(opcodes, 0, 3, min_len=4) is True
 
 
 def test_has_anchor_picks_best_among_multiple_equal_blocks():
