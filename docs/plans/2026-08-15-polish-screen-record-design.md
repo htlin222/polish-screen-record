@@ -255,6 +255,19 @@ files.list  q = name = 'tutorial.zh-Hant.srt'
 
 **陷阱 2：`drive.file` scope 看不到既有的 mp4**（已在 §10 說明，此處交叉引用即可）。
 
+### 已端到端驗證（2026-08-16）
+
+`drive.readonly` + `drive.file` 這組 scope 配上自建的桌面 OAuth 用戶端，實測全部成立：
+
+| 驗證項目 | 結果 |
+| --- | --- |
+| 讀取私有影片 metadata | ✓ 不需把檔案設為公開 |
+| `md5Checksum` 免下載即得 | ✓ `dc59346753cd8fb79b361c87f22fa46a`（5.98GB 影片，零傳輸） |
+| 用 `drive.file` 在既有資料夾建立新檔 | ✓ SRT 成功寫到 mp4 旁邊 |
+| find-or-update 冪等性 | ✓ 重跑走 `files.update`，同名檔案維持 1 個、未產生重複 |
+
+`md5Checksum` 可在不傳輸任何影片資料的情況下取得，§3 的內容定址與 §12 的 preflight 因此都成立。
+
 **上傳順序即 checkpoint**：`mp3 → words.json → raw.srt → manifest → zh-Hant.srt`，最終 SRT 最後上傳。中途死掉 → Drive 有前面的產物、沒有最終檔 → 下次重跑自動續，不需要外部狀態儲存。
 
 ---
