@@ -17,6 +17,25 @@ Drive 上 1–8GB 的螢幕錄製教學影片 → 自動產出潤稿過的繁體
 
 ---
 
+## 1.5 兩種來源
+
+pipeline 接受兩種輸入，在取得 `words.json` 之後完全共用同一條下游流程。
+
+| 來源 | issue 內文 | 產物位置 |
+| --- | --- | --- |
+| Drive 既有影片 | Drive 檔案連結或 ID | 與 mp4 同一個資料夾 |
+| YouTube | YouTube 連結 | `videos/<slug>/` |
+
+**YouTube 路徑**：解析 video ID → `yt-dlp` 取標題 → `slugify` → 在 Colab VM 上下載 mp4 並上傳到 Drive 的 `videos/<slug>/<slug>.raw.mp4` → 之後與 Drive 路徑完全相同。
+
+在 **VM 上**跑 `yt-dlp` 而不是 runner：VM 到 Google 的頻寬好，而且影片檔完全不必經過 GitHub runner 的磁碟（runner 只有約 14GB 可用）。
+
+**slug 保留中文、只去掉符號**，不轉拼音。這個資料夾會出現在使用者自己的 Drive 裡，看得懂比 ASCII 安全重要——`提示詞（Prompt）設計與實作技巧` 轉成 `tishici-prompt-...` 之後，在 Drive 列表裡根本認不出是哪一支。實測 `提示詞（Prompt）設計與實作技巧` → `提示詞-Prompt-設計與實作技巧`。
+
+**連結解析與 Drive 檔案 ID 採同一個嚴格原則**：找到 0 個或 2 個以上**不同**的連結都直接失敗，絕不「取第一個」。猜錯的代價是花十幾分鐘轉錄了錯的影片，而且要看完才會發現。同一支影片被貼成 `youtu.be` 與 `watch?v=` 兩種形式視為一個，不算衝突。支援 watch / youtu.be / embed / shorts / live 五種形式。
+
+---
+
 ## 2. 產物
 
 以範例影片 `tutorial.mp4` 為例，pipeline 會在同一個 Drive 資料夾產出：
@@ -78,7 +97,7 @@ tutorial.zh-Hant.srt
 | 檔案大小 | 免費 25MB / dev tier 100MB → 3 小時需切 2–3 塊 | 無限制 |
 | 可靠性 | 確定性高 | 動態配額，可能失敗 |
 
-16kHz mono MP3 @32kbps 約 14MB/小時，3 小時約 43MB，切 3 塊即可；Whisper 內部本來就重採樣到 16kHz，音質無損失。切塊點用 ffmpeg `silencedetect` 落在靜音處，每塊記錄時間偏移量。
+16kHz mono MP3 @32kbps 約 14MB/小時（2026-08-16 實測：87.2 分鐘 → **21MB**，5.6GB 影片抽音訊僅 11 秒、470x 實時）。也就是說 **100 分鐘以內的影片整支就在 Groq 免費層 25MB 上限內，完全不需要切塊**；切塊邏輯只有超過約 1.7 小時才會啟用。3 小時約 43MB，切 3 塊即可；Whisper 內部本來就重採樣到 16kHz，音質無損失。切塊點用 ffmpeg `silencedetect` 落在靜音處，每塊記錄時間偏移量。
 
 ---
 
@@ -96,8 +115,17 @@ Colab VM 不能跑 Docker，兩邊無法共用 image；改用同一份 `scripts/
 | Python 依賴 | `uv sync --frozen`（uv.lock 進版控） |
 | 模型權重 | HF revision SHA，不是 main，不是 tag |
 | CTranslate2 / compute_type | 明確釘 float16 |
+| `google-colab-cli` 的依賴 | **必須釘 `jupyter-kernel-client==0.15.0`** |
 
 GPU 型號寫進 manifest（不影響 key，但除錯時需要）。
+
+⚠️ **`google-colab-cli` 上游宣告的是 `Requires-Dist: jupyter-kernel-client`，完全沒鎖版本。** 該套件 1.0.0 把 `KernelClient` 改名為 `JupyterKernelClient`，導致 CLI 一執行就 `AttributeError` 而完全無法使用。安裝時必須：
+
+```bash
+uv tool install google-colab-cli --with "jupyter-kernel-client==0.15.0"
+```
+
+這件事在 Phase 0 spike 當場踩到（見 §15）。它同時是本節存在理由的最佳示範：**沒鎖版本的依賴不是「將來可能出問題」，是「上游隨時可以讓你的 pipeline 停止運作」**。
 
 ### 鎖 2：解碼參數
 
@@ -141,6 +169,8 @@ Groq 側同樣送 `temperature=0`。
   2. 標點與口語贅字
   3. 重切字幕行
 - LLM 絕不輸出任何數字時間碼。
+- ⚠️ **prompt 必須明確禁止刪除重複內容。** 真實影片實測發現：講者重複同一句話時，「刪除口語贅字」的指令會讓 LLM 把重複視為冗餘而整段刪除。逐字稿「導演 來個特寫來個特寫退出來個特寫退出」被潤成「導演，來個特寫！／退出。」，掉了約一半內容，編輯距離遠超 8% 上限。這在螢幕錄製教學裡很常見——講者常會重述操作步驟。
+- ⚠️ **Whisper 的中文 word token 會帶前導空格**（實測 `' 來'`）。串接後會產生「導演 來個特寫」這種夾雜空格的中文字幕。清理規則：刪除兩側都是東亞寬字元的空白，但保留英文術語兩側的空白（「安裝 Python 環境」）。已實作於 `segment.clean_text`。
 
 ---
 
@@ -148,11 +178,26 @@ Groq 側同樣送 `temperature=0`。
 
 1. 兩側各壓成字元流，同時保留「字元位置 → 來源」的反查表（原始側指回 word index，潤稿側指回 line + offset）。任何一步都不能弄丟這張表。
 2. 正規化只用於比對：去標點空白、繁簡統一、全半形統一、拉丁字母 casefold。正規化後的位置必須能反查回原始位置。
+
+   繁簡統一是**逐字元**的，只折疊字形（`計算機`/`计算机` 相同），不折疊用詞（`軟體`/`软件` 仍視為不同）。詞彙級轉換需要跨字元的上下文，會破壞 1:1 索引映射；且用詞改動本來就是真實的內容修改，應計入 8% 編輯距離預算，而非被正規化抹平。
 3. `difflib.SequenceMatcher(autojunk=False)` 取 opcodes。
 
    **強調這是強制的**：預設的 autojunk 會把「長度 ≥200 的序列中出現超過 1% 的元素」當雜訊丟掉——中文的「的、是、我、這」全部中標，比對會靜默地爛掉，不會報錯，只會給出錯誤的時間軸。
 4. 每個斷行點映射到原始側：落在 `equal` 區塊內 → 精確對應；落在 `replace`/`insert` 內 → 吸附到最近的 `equal` 邊界，平手時固定取前者（決定性 tie-break）。
-5. 原始字元位置 → word index → 時間。行首 = 該區間第一個 word 的 start，行尾 = 下一個斷點前最後一個 word 的 end。
+5. 原始字元位置 → 時間。**每個斷點推導出一對時間 `(前一行結束, 後一行開始)`**，而非單一值，因為兩者不一定相同——中間可能隔著靜音。分兩種情況：
+
+   | 斷點位置 | 前一行結束 | 後一行開始 | 效果 |
+   |---|---|---|---|
+   | 落在 word **內部** | 內插值 | 同一個內插值 | 首尾相接，不重疊 |
+   | 落在 word **之間** | 前一個 word 的 `end` | 這個 word 的 `start` | **保留中間的靜音** |
+
+   內插公式：`t = word.start + (word 內位移 ÷ word 字元數) × (word.end − word.start)`。
+
+   因為 word 時間單調不重疊，`prev.end ≤ word.start` 恆成立，所以 `cue[i].end ≤ cue[i+1].start` 是建構上的保證。
+
+   ⚠️ **原始版本寫的是「行首 = 該區間第一個 word 的 start，行尾 = 下一個斷點前最後一個 word 的 end」，那是錯的。** 當斷點落在 word 內部，前後兩行會引用到同一個 word，前一行取它的 `end`、後一行取它的 `start`，必然產生時間軸重疊。實測 `words=[今天我們(0–2), 先來安裝(2–4), …]`、`lines=["今天我們先來安", "裝Python環境…"]` 得到 `cue1.end=4.0 > cue2.start=2.0`，重疊 2 秒。
+
+   這對中文是常態而非邊緣案例：Whisper 對中文輸出多字詞，而重切字幕行本來就會切進 word 內部。驗證器雖然攔得下來，但那代表幾乎每個窗口都降級，重切功能等於報廢。內插假設 word 內字元等時長，誤差上限是該 word 自身的時長（通常 < 1 秒），遠優於重疊。
 6. 錨點品質檢查：每行跨度內至少要有一個長度 ≥4 的 `equal` 區塊。沒有 → 該行標記 unanchored。**窗口內只要有一行 unanchored，整窗降級為 raw 斷句**。
 
 **保守降級的理由**：只降級單行會在前後製造時間軸縫隙，需要縫合邏輯，而縫合邏輯本身是新的 bug 來源。保守版讓失敗看得見（某段字幕突然變醜就是訊號），而不是製造微妙的錯位。
@@ -163,16 +208,25 @@ Groq 側同樣送 `temperature=0`。
 
 | 檢查 | 條件 |
 | --- | --- |
+| 文字非空 | `text.strip()` 非空 |
 | 區間合法 | `start < end` |
 | 單調 | `cue[i].end ≤ cue[i+1].start` |
 | 邊界 | `cue[0].start ≥ 0`、`cue[-1].end ≤` 音訊長度 |
 | 行寬 | ≤ 20 全形（依 `east_asian_width`：W/F 記 1.0，其餘 0.5） |
 | 時長 | 0.5–7.0 秒。超過 → 在最大字間隔處切；不足 → 在空檔允許下延長 |
 | 閱讀速度 | ≤ 9 全形字/秒 |
-| 術語完整 | 英文 token 不可被斷行切開 |
+| ~~術語完整~~ | ~~英文 token 不可被斷行切開~~ — **已移除，改由建構層保證**（見下） |
 | 序號 | 從 1 連續遞增 |
 
 字幕排版規範：單行、每行 ≤ 20 全形字。
+
+⚠️ **「英文 token 不可被斷行切開」無法在驗證器層實作。** 驗證器只看得到字幕文字，而「原本這裡有沒有空格」在渲染時就被吃掉，因此它在原理上分不出「把 `prompt` 劈成 `prom`｜`pt`」與「在 `early`｜`breast` 兩個獨立單字之間斷行」。
+
+87 分鐘實片實測：修正前 116 個違規多數為真，修正後剩下的 49 個經逐條檢視**全是誤報**。留著它等於每支影片的每個窗口都因假違規而降級，系統直接不可用。
+
+改由**建構層保證**：`segment._split_without_breaking_ascii` 在斷行會切開連續 ASCII 英數串時，退回到該串的起點。根因是 **Whisper 把英文輸出成 BPE 子詞片段**——實測 `prompt` → `['prom','pt']`、`Agent` → `['A','gent']`、`2026` → `['20','26']`。
+
+已知殘留：Whisper 偶爾在縮寫內插入空格（實測 `'T'` / `' N'` / `'BC'` → TNBC），建構層看到空格就認定可斷。應由潤稿階段修正。
 
 ---
 
@@ -200,8 +254,9 @@ run: uv run psr parse-issue                     # ← Python 讀 os.environ，�
 ```
 
 - 再加 `github.event.sender.login == github.repository_owner`（檢查**加 label 的人**，不是開 issue 的人）。
+- ⚠️ **必須自建 OAuth client，不能借用 gcloud 的**（2026-08-16 實測）。`gcloud auth application-default login --scopes=...drive.readonly` 會被 Google 直接封鎖：「系統已封鎖這個應用程式」。Drive 屬於敏感範圍，而 gcloud 內建的 OAuth client 未通過 Drive 的驗證。因此 Phase 2 有一段**無法自動化的前置作業**，必須在 GCP Console 手動完成：啟用 Drive API → 設定 OAuth 同意畫面（External / Testing，把自己加為測試使用者）→ 建立「桌面應用程式」類型的用戶端 ID → 下載 `client_secret.json`。之後才能跑本機授權流程換取 refresh token。ADC（`cloud-platform` 範圍）仍可繼續供 Colab CLI 使用，兩者互不影響。
 - **OAuth scope 最小組合**：`drive.readonly` + `drive.file`。`drive.file` 只涵蓋「本 app 建立或使用者明確選取」的檔案，單靠它連來源影片都讀不到；但兩者組合的結果是這個 token 在數學上無法修改或刪除任何不是它產生的檔案。
-- **Colab VM 只拿唯讀、只活一小時**：runner 用 refresh token 換 access token，只把 `drive.readonly` 那個送進 VM。VM 讀影片、跑轉錄，產物由 `colab download` 拉回 runner，**上傳一律由 runner 執行**。VM 從頭到尾沒有寫入權、從沒見過 refresh token。最壞情況是洩漏一小時的唯讀存取。
+- **Colab VM 只拿唯讀、只活一小時**（已驗證為唯一可行路徑：`colab drivemount` 在無頭環境失敗，見 §15）：runner 用 refresh token 換 access token，只把 `drive.readonly` 那個送進 VM。VM 讀影片、跑轉錄，產物由 `colab download` 拉回 runner，**上傳一律由 runner 執行**。VM 從頭到尾沒有寫入權、從沒見過 refresh token。最壞情況是洩漏一小時的唯讀存取。
 
 ---
 
@@ -218,6 +273,19 @@ files.list  q = name = 'tutorial.zh-Hant.srt'
 ```
 
 **陷阱 2：`drive.file` scope 看不到既有的 mp4**（已在 §10 說明，此處交叉引用即可）。
+
+### 已端到端驗證（2026-08-16）
+
+`drive.readonly` + `drive.file` 這組 scope 配上自建的桌面 OAuth 用戶端，實測全部成立：
+
+| 驗證項目 | 結果 |
+| --- | --- |
+| 讀取私有影片 metadata | ✓ 不需把檔案設為公開 |
+| `md5Checksum` 免下載即得 | ✓ `dc59346753cd8fb79b361c87f22fa46a`（5.98GB 影片，零傳輸） |
+| 用 `drive.file` 在既有資料夾建立新檔 | ✓ SRT 成功寫到 mp4 旁邊 |
+| find-or-update 冪等性 | ✓ 重跑走 `files.update`，同名檔案維持 1 個、未產生重複 |
+
+`md5Checksum` 可在不傳輸任何影片資料的情況下取得，§3 的內容定址與 §12 的 preflight 因此都成立。
 
 **上傳順序即 checkpoint**：`mp3 → words.json → raw.srt → manifest → zh-Hant.srt`，最終 SRT 最後上傳。中途死掉 → Drive 有前面的產物、沒有最終檔 → 下次重跑自動續，不需要外部狀態儲存。
 
@@ -301,7 +369,41 @@ terms:
 4. `uv tool install google-colab-cli`，執行 `colab exec --gpu T4 -f hello.py`。
 5. 判準：能配置到 T4、`nvidia-smi` 有輸出、`colab download` 能取回檔案。
 
-**未解的未知數（明確標示）**：Colab API 是否接受消費者 Gmail 帳號的 ADC。ADC 使用者憑證通常需要設 quota project，而免費 Colab 額度綁在消費者帳號上；官方零 CI 文件。這正是它是 spike 而非 task 的原因。**若 spike 失敗**：Colab 退成本機手動執行，主路徑自動變成 Groq，Phase 1–4 的成果完全不受影響。
+### Phase 0 spike 結果（2026-08-15，已驗證）
+
+**結論：通過。** 原先標為「未解未知數」的問題——Colab API 是否接受消費者 Gmail 帳號的 ADC——答案是**接受**。`gcloud auth application-default login` 產生的憑證直接可用，**quota project 的 WARNING 無害**，不需要 `set-quota-project`。
+
+實測輸出：
+
+```
+$ colab --auth adc run --gpu T4 --timeout 300 spike.py
+[colab] Creating session 'run-7feaf7'...
+[colab] Session READY (run-7feaf7). Executing spike.py...
+SPIKE_OK python: 3.12.13
+GPU: Tesla T4, 15360 MiB, 580.82.07
+ffmpeg: /usr/bin/ffmpeg
+disk_free_GB: 65.6
+[colab] Stopping session 'run-7feaf7'...
+real 0m19.8s
+```
+
+| 項目 | 實測值 | 對設計的影響 |
+| --- | --- | --- |
+| 配置 + 執行 + 釋放總耗時 | **19.8 秒** | 開關 VM 的成本可忽略 |
+| GPU | Tesla T4 16GB | 足夠跑 large-v3 float16 |
+| VM 磁碟可用 | 65.6 GB | 8GB 影片 + 音訊綽綽有餘 |
+| ffmpeg | **VM 預裝** `/usr/bin/ffmpeg` | 但仍須用 bootstrap 釘選版本，見鎖 1 |
+| VM Python | 3.12.13 | 與 runner 的 3.11 不同，`remote_job.py` 須相容兩者 |
+
+**採用 `colab run` 而非 `new` + `exec` + `stop`。** 它在全新 VM 執行腳本後自動釋放，正是 CI 要的原語。⚠️ **`--timeout` 預設只有 30 秒**，轉錄務必顯式加大。
+
+**`--auth` 預設是 `oauth2` 不是 `adc`**，CI 中必須顯式指定 `--auth adc`。
+
+**`drivemount` 實測不可用於無頭環境**（`ValueError: mount failed`，需要互動式 OAuth）。因此 §10 的設計——runner 換發唯讀 access token 送進 VM、由 VM 以 Drive API 下載——不只是較安全的選擇，而是**唯一可行的選擇**。此點已從假設升級為驗證事實。
+
+**仍未驗證**：以上皆為本機執行。GitHub Actions 無頭環境需再確認 base64 還原的 ADC 檔搭配 `GOOGLE_APPLICATION_CREDENTIALS` 可正常運作。風險已大幅降低，但尚未證明。
+
+**若 CI 環節失敗**：Colab 退成本機手動執行，主路徑自動變成 Groq，Phase 1–4 的成果完全不受影響。
 
 ---
 
