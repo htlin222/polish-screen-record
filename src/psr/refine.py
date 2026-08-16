@@ -46,15 +46,51 @@ def merge_short_cues(
         width_ok = display_width(joined) <= max_width or (
             not _at_punctuation(prev.text) and display_width(joined) <= hard_max
         )
+        # 碎片（任一側去空白後不足兩個全形字寬）一律合併，不受間隔限制。
+        # 一條只有 'I' 或 'ys' 的字幕永遠是錯的——閃一下、讀不到、還佔著
+        # 螢幕時間。實測潤稿模型在少數窗口會退回逐字元切分，產出大量這種
+        # 碎片，讓它們因為跨越靜音而留在原地只是把模型的失誤原樣呈現。
+        fragment = min(display_width(prev.text.strip()),
+                       display_width(cue.text.strip())) < 2
         if (
             not _should_stop(prev.text, soft_min)
-            and cue.start - prev.end <= max_gap
-            and width_ok
+            and (fragment or cue.start - prev.end <= max_gap)
+            and (width_ok or fragment)
             and cue.end - prev.start <= max_s
         ):
             out[-1] = Cue(index=prev.index, start=prev.start, end=cue.end, text=joined)
         else:
             out.append(cue)
+    return _reindex(out)
+
+
+FRAGMENT_WIDTH = 2.0
+
+
+def absorb_fragments(cues: list[Cue], min_width: float = FRAGMENT_WIDTH) -> list[Cue]:
+    """把碎片字幕併進鄰居，直到一條都不剩。
+
+    merge_short_cues 已經會合併碎片，但它同時受標點停止條件約束——碎片剛好
+    跟在句號後面時就不會被吸收。實測 87 分鐘影片仍留下 184 條單字元字幕。
+
+    這一道獨立的收尾不看標點也不看間隔，只問一件事：這條字幕**讀得到嗎**。
+    一條寬度不到兩個全形字的字幕在螢幕上就是閃一下，讀不到卻佔著時間，
+    無論它前面是句號還是逗號都一樣錯。
+
+    併入哪一側取決於時間距離：黏給比較近的鄰居，這樣時間軸的失真最小。
+    """
+    if not cues:
+        return []
+    out: list[Cue] = []
+    for cue in cues:
+        if out and display_width(cue.text.strip()) < min_width:
+            prev = out[-1]
+            out[-1] = Cue(prev.index, prev.start, cue.end, prev.text + cue.text)
+            continue
+        if out and display_width(out[-1].text.strip()) < min_width:
+            prev = out.pop()
+            cue = Cue(prev.index, prev.start, cue.end, prev.text + cue.text)
+        out.append(cue)
     return _reindex(out)
 
 
@@ -187,9 +223,12 @@ def _split_one(cue: Cue, words: list[Word], max_s: float) -> list[Cue]:
     if len(cue_words) < 2:
         # 沒有字間間隔可切，只能保留原樣（不製造無中生有的斷點）
         return [cue]
-    if len(cue.text) < 2:
-        # 文字只有一個字元，切開必然有一半是空的。寧可留一條過長的字幕，
-        # 也不要產生一條佔著螢幕時間卻沒有字的空白字幕。
+    if len(cue.text.strip()) < 2:
+        # 去掉空白後不足兩個字元，切開必然有一半沒有內容。寧可留一條過長的
+        # 字幕，也不要產生一條佔著螢幕時間卻沒有字的空白字幕。
+        #
+        # 這裡用 strip() 而非 len(cue.text)：實測 'I ' 長度是 2 會通過原本的
+        # 檢查，然後被對半切成 'I' 與 ' '，後者就是一條空白字幕。
         return [cue]
 
     # 找字間最大間隔作為切點
@@ -221,6 +260,15 @@ def _split_one(cue: Cue, words: list[Word], max_s: float) -> list[Cue]:
 
     left_text = cue.text[:split_char]
     right_text = cue.text[split_char:]
+    if (display_width(left_text.strip()) < FRAGMENT_WIDTH
+            or display_width(right_text.strip()) < FRAGMENT_WIDTH):
+        # 箝制保證了兩半非空「字串」，但沒保證兩半**讀得到**。'I ' 切成
+        # 'I' 與 ' ' 是極端案例，「所以當」切成「所以」與「當」則是常態——
+        # 兩者都是佔著螢幕時間卻讀不到的碎片。寧可留一條過長的字幕。
+        #
+        # 這道檢查必須在切分處，不能只靠事後的 absorb_fragments：那一步跑在
+        # enforce_duration 之前，切分產生的新碎片它看不到。
+        return [cue]
 
     # 保留 cue 原本的外側邊界，只在中間切開。用 left_words[0].start 當左半起點
     # 會在 cue 起始於某個 word 內部時丟失原本的起始時間。

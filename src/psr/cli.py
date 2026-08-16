@@ -23,7 +23,8 @@ from psr.asr import colab as colab_asr
 from psr.asr.colab import ColabUnavailable
 from psr.issue import parse_issue
 from psr.models import Cue, Word
-from psr.refine import enforce_duration, merge_short_cues, strip_leading_punctuation, wrap_lines
+from psr.refine import (absorb_fragments, enforce_duration, merge_short_cues,
+                        strip_leading_punctuation, wrap_lines)
 from psr.segment import raw_segment
 from psr.srt import render
 from psr.validate import validate
@@ -72,6 +73,7 @@ def _build_cues(words, windows, audio_duration):
     cues = [Cue(i + 1, c.start, c.end, c.text) for i, c in enumerate(cues)]
     cues = merge_short_cues(cues)
     cues = strip_leading_punctuation(cues)
+    cues = absorb_fragments(cues)
     flat = [w for ws in windows for w in ws]
     cues = enforce_duration(cues, flat, audio_duration=audio_duration)
     cues = wrap_lines(cues)
