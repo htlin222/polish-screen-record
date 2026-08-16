@@ -1,3 +1,4 @@
+import time
 import json
 from dataclasses import dataclass, field
 
@@ -65,11 +66,39 @@ def load_credentials(token_json: str) -> Credentials:
     return Credentials.from_authorized_user_info(info, scopes=SCOPES)
 
 
+_RETRY_DELAYS = (2, 5, 15, 40)
+
+
+def with_retry(call, what: str):
+    """對 Drive 的單次 API 呼叫做重試。
+
+    存在理由是實測踩到的：一次 CI 執行在 Colab T4 上花了 11 分鐘完成轉錄，
+    接著在查詢同名檔案的那個 metadata 請求上撞到 BrokenPipeError，整趟 GPU
+    成果全部丟失。連線層的瞬斷是常態而非例外，而重跑的代價在這條 pipeline
+    上高得離譜——不重試等於把十幾分鐘的算力押在一個 TCP 連線上。
+
+    退避固定不加 jitter：這條 pipeline 一次只有一個執行者，jitter 只會讓
+    行為變得不可重現，換不到任何避免驚群的好處。
+    """
+    last = None
+    for attempt, delay in enumerate((*_RETRY_DELAYS, None)):
+        try:
+            return call()
+        except (BrokenPipeError, ConnectionError, TimeoutError, OSError) as exc:
+            last = exc
+            if delay is None:
+                break
+            time.sleep(delay)
+    raise DriveError(f"{what} 重試 {len(_RETRY_DELAYS)} 次後仍失敗：{last}") from last
+
+
 def preflight(service, file_id: str) -> FileInfo:
     """跑完整條 pipeline 前的守門檢查：只呼叫一次 `files().get()`，
     不傳輸任何影片資料就驗證 mimeType 與大小是否合法（設計文件 §12）。
     """
-    meta = service.files().get(fileId=file_id, fields=_PREFLIGHT_FIELDS).execute()
+    meta = with_retry(
+        lambda: service.files().get(fileId=file_id, fields=_PREFLIGHT_FIELDS).execute(),
+        f"讀取 {file_id} 的 metadata")
 
     mime_type = meta.get("mimeType", "")
     if not mime_type.startswith("video/"):
@@ -110,28 +139,29 @@ def find_or_create(service, name: str, folder_id: str, local_path: str, mime_typ
     """
     escaped_name = _escape_query_value(name)
     query = f"name = '{escaped_name}' and '{folder_id}' in parents and trashed = false"
-    response = (
-        service.files()
+    response = with_retry(
+        lambda: service.files()
         .list(q=query, fields="files(id,name,webViewLink)", spaces="drive")
-        .execute()
-    )
+        .execute(),
+        f"查詢同名檔案 {name}")
     matches = response.get("files", [])
 
     media = MediaFileUpload(local_path, mimetype=mime_type, resumable=True)
 
     if matches:
         file_id = matches[0]["id"]
-        result = (
-            service.files()
+        result = with_retry(
+            lambda: service.files()
             .update(fileId=file_id, media_body=media, fields="id,name,webViewLink")
-            .execute()
-        )
+            .execute(),
+            f"更新 {name}")
     else:
         body = {"name": name, "parents": [folder_id]}
-        result = (
-            service.files()
+        result = with_retry(
+            lambda: service.files()
             .create(body=body, media_body=media, fields="id,name,webViewLink")
-            .execute()
+            .execute(),
+            f"建立 {name}"
         )
 
     return FileMeta(
@@ -150,7 +180,7 @@ def download(service, file_id: str, dest_path: str) -> None:
         downloader = MediaIoBaseDownload(fh, request, chunksize=_DOWNLOAD_CHUNK_SIZE)
         done = False
         while not done:
-            _status, done = downloader.next_chunk()
+            _status, done = with_retry(downloader.next_chunk, f"下載 {file_id}")
 
 
 def mint_readonly_access_token(creds: Credentials) -> str:
@@ -187,13 +217,17 @@ def ensure_folder(service, name: str, parent_id: str | None = None) -> str:
     ]
     if parent_id:
         clauses.append(f"'{parent_id}' in parents")
-    found = service.files().list(
-        q=" and ".join(clauses), fields="files(id)", spaces="drive"
-    ).execute().get("files", [])
+    found = with_retry(
+        lambda: service.files().list(
+            q=" and ".join(clauses), fields="files(id)", spaces="drive"
+        ).execute(),
+        f"查詢資料夾 {name}").get("files", [])
     if found:
         return found[0]["id"]
 
     body = {"name": name, "mimeType": "application/vnd.google-apps.folder"}
     if parent_id:
         body["parents"] = [parent_id]
-    return service.files().create(body=body, fields="id").execute()["id"]
+    return with_retry(
+        lambda: service.files().create(body=body, fields="id").execute(),
+        f"建立資料夾 {name}")["id"]

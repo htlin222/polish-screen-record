@@ -241,3 +241,31 @@ def test_ensure_folder_creates_when_missing_and_escapes_quotes():
     assert ensure_folder(svc, "It's a folder", "parent1") == "new"
     assert "It\\'s a folder" in svc._f.q
     assert svc._f.body["parents"] == ["parent1"]
+
+
+def test_with_retry_recovers_from_a_transient_broken_pipe():
+    # 實測踩過：Colab T4 上花了 11 分鐘轉錄，接著在一個 metadata 查詢上
+    # 撞到 BrokenPipeError，整趟 GPU 成果全部丟失。
+    from psr import drive as d
+    calls = {"n": 0}
+
+    def flaky():
+        calls["n"] += 1
+        if calls["n"] < 3:
+            raise BrokenPipeError(32, "Broken pipe")
+        return {"ok": True}
+
+    d._RETRY_DELAYS = (0, 0, 0, 0)          # 測試不真的等
+    assert d.with_retry(flaky, "測試") == {"ok": True}
+    assert calls["n"] == 3
+
+
+def test_with_retry_gives_up_and_reports_which_call_failed():
+    from psr import drive as d
+    d._RETRY_DELAYS = (0, 0)
+
+    def always_broken():
+        raise BrokenPipeError(32, "Broken pipe")
+
+    with pytest.raises(d.DriveError, match="查詢同名檔案"):
+        d.with_retry(always_broken, "查詢同名檔案 x.srt")
