@@ -133,3 +133,14 @@ def test_last_cue_is_not_extended_past_audio_end():
     # 未提供 audio_duration 時維持原本行為（延到 min_s）
     out2 = enforce_duration(cues, words, min_s=0.5, max_s=7.0)
     assert out2[-1].end == pytest.approx(20.98)
+
+
+def test_strip_leading_punctuation_drops_cues_that_become_empty():
+    # 整條只有標點的字幕，剝完就變空的。空白字幕佔著螢幕時間卻什麼都不顯示，
+    # 而且時長合法、不重疊、行寬 0、閱讀速度 0——其他規則全都抓不到它。
+    # 實測第四次 CI 執行產出 6 條這樣的字幕。
+    from psr.refine import strip_leading_punctuation
+    cues = [Cue(1, 0.0, 1.0, "正常字幕"), Cue(2, 1.0, 1.2, "，"), Cue(3, 1.2, 2.0, "也正常")]
+    out = strip_leading_punctuation(cues)
+    assert [c.text for c in out] == ["正常字幕", "也正常"]
+    assert [c.index for c in out] == [1, 2], "刪掉之後序號必須重新連續"

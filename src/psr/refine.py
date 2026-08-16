@@ -70,10 +70,15 @@ def strip_leading_punctuation(cues: list[Cue]) -> list[Cue]:
     那個停頓，於是下一條字幕以「，」開頭。實測：「大家好，我是林協廷醫師」／
     「，今天這堂課是……」。
     """
-    return _reindex([
+    stripped = [
         Cue(index=c.index, start=c.start, end=c.end, text=c.text.lstrip(_LEADING_JUNK).lstrip())
         for c in cues
-    ])
+    ]
+    # 整條只有標點的字幕，剝完就變成空的。空白字幕會佔著螢幕時間卻什麼都
+    # 不顯示，而且**其他所有規則都抓不到它**：時長合法、不重疊、行寬 0、
+    # 閱讀速度 0。實測第四次 CI 執行產出 6 條這樣的字幕——先前在
+    # _split_one 加的守衛只堵住了其中一個產生途徑，這裡是另一個。
+    return _reindex([c for c in stripped if c.text.strip()])
 
 
 def wrap_lines(cues: list[Cue], max_width: float = 18.0) -> list[Cue]:
