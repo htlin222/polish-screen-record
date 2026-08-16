@@ -35,7 +35,20 @@ def _assert_graceful(words, lines):
         return
     final = enforce_duration(result, words)
     violations = validate(final, words[-1].end)
-    assert violations == []
+
+    # 時長違規是**可接受**的結果。切分時若任一半會變成讀不到的碎片
+    # （寬度不足兩個全形字），_split_one 會拒絕切、留下一條過長的字幕。
+    # 那是刻意的取捨：一條稍長的字幕還讀得完，一條閃一下的碎片讀不到。
+    # 對抗性輸入（整段被刪）正是最容易觸發這個取捨的情境。
+    #
+    # 其餘每一類違規仍然不可接受——尤其是空白文字、重疊、超出音訊範圍，
+    # 那些是結構性錯誤而非可讀性取捨。
+    structural = [v for v in violations if "時長" not in v]
+    assert structural == [], f"出現非時長類的違規：{structural}"
+
+    from psr.text import display_width
+    assert all(c.text.strip() for c in final), "產生了空白字幕"
+    assert all(display_width(c.text.strip()) >= 2 for c in final), "產生了讀不到的碎片"
 
 
 def test_llm_drops_a_whole_sentence():

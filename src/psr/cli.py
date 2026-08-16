@@ -17,13 +17,13 @@ import time
 
 from googleapiclient.discovery import build
 
-from psr import drive, glossary as glossary_mod, manifest as manifest_mod, polish as polish_mod
-from psr.align import align
+from psr import drive, glossary as glossary_mod, manifest as manifest_mod, punctuate as punct_mod
 from psr.asr import colab as colab_asr
 from psr.asr.colab import ColabUnavailable
 from psr.issue import parse_issue
 from psr.models import Cue, Word
-from psr.refine import enforce_duration, merge_short_cues, strip_leading_punctuation, wrap_lines
+from psr.refine import absorb_fragments, enforce_duration, wrap_lines
+from psr.timeline import build_cues, coverage
 from psr.segment import raw_segment
 from psr.srt import render
 from psr.validate import validate
@@ -31,7 +31,7 @@ from psr.youtube import drive_paths, slugify
 
 TOKEN_PATH = pathlib.Path.home() / ".config/polish-screen-record/token.json"
 ASR_STAGE_VERSION = "1"
-POLISH_STAGE_VERSION = "1"
+PUNCTUATE_STAGE_VERSION = "1"
 
 
 def _youtube_title(video_id: str) -> str:
@@ -59,23 +59,33 @@ def _resolve_target(service, source):
     return folder, slug, "", None
 
 
-def _build_cues(words, windows, audio_duration):
-    """把每個窗口的潤稿行貼回時間軸；沒潤到的窗口退回決定性斷句。"""
-    cues, degraded = [], 0
-    for window_words, lines in zip(windows, words):
-        got = align(window_words, lines) if lines else None
-        if got is None:
-            degraded += 1
-            got = raw_segment(window_words)
-        cues.extend(got)
+def _punctuate(words, client, executor_workers=6):
+    """第一階段：替原文加標點。失敗的塊退回原文——沒有標點的字幕仍然可讀，
+    內容被竄改的字幕不行。"""
+    from concurrent.futures import ThreadPoolExecutor
 
-    cues = [Cue(i + 1, c.start, c.end, c.text) for i, c in enumerate(cues)]
-    cues = merge_short_cues(cues)
-    cues = strip_leading_punctuation(cues)
-    flat = [w for ws in windows for w in ws]
-    cues = enforce_duration(cues, flat, audio_duration=audio_duration)
+    chunks = punct_mod.make_chunks(words)
+    with ThreadPoolExecutor(max_workers=executor_workers) as pool:
+        results = list(pool.map(lambda c: punct_mod.punctuate_chunk(c, client), chunks))
+
+    text = "".join(out if out else chunks[i] for i, (out, _, _, _) in enumerate(results))
+    failed = [i for i, (out, _, _, _) in enumerate(results) if out is None]
+    prompt_tokens = sum(r[1] for r in results)
+    completion_tokens = sum(r[2] for r in results)
+    return text, failed, len(chunks), prompt_tokens, completion_tokens
+
+
+def _build_cues(words, punctuated, audio_duration):
+    """第二階段：把加了標點的文字對回時間軸。
+
+    時間是**查表**得來的，不是用 diff 猜的——第一階段保證去掉標點後與原文
+    逐字相同，所以每個字元都對得到它所屬的 word。不會漂移、不會降級。
+    """
+    cues = build_cues(words, punctuated)
+    cues = absorb_fragments(cues)
+    cues = enforce_duration(cues, words, audio_duration=audio_duration)
     cues = wrap_lines(cues)
-    return [Cue(i + 1, c.start, c.end, c.text) for i, c in enumerate(cues)], degraded
+    return [Cue(i + 1, c.start, c.end, c.text) for i, c in enumerate(cues)]
 
 
 def _transcribe(source, creds, gloss, work_dir):
@@ -134,18 +144,19 @@ def run(report_path: str) -> int:
         man.gpu_model = meta.get("gpu", "")
         man.timings.update(meta.get("seconds", {}))
 
-        man.stage_keys["polish"] = manifest_mod.stage_key(
-            "polish", POLISH_STAGE_VERSION,
+        man.stage_keys["punctuate"] = manifest_mod.stage_key(
+            "punctuate", PUNCTUATE_STAGE_VERSION,
             [man.stage_keys["asr"], gloss.content_hash()],
-            {"model": "deepseek-v4-flash"})
+            {"model": punct_mod.MODEL})
 
-        windows = polish_mod.make_windows(words)
-        lines_per_window, result = polish_mod.polish_words(words, gloss)
-        cues, degraded = _build_cues(lines_per_window, windows, audio_duration)
+        from openai import OpenAI
+        llm = OpenAI(api_key=os.environ["DEEPSEEK_API_KEY"],
+                     base_url="https://api.deepseek.com")
+        punctuated, failed, total_chunks, ptok, ctok = _punctuate(words, llm)
+        cues = _build_cues(words, punctuated, audio_duration)
 
-        man.degraded_window_count = degraded
-        man.cost = round(result.prompt_tokens / 1e6 * 0.14
-                         + result.completion_tokens / 1e6 * 0.28, 4)
+        man.degraded_window_count = len(failed)
+        man.cost = round(ptok / 1e6 * 0.14 + ctok / 1e6 * 0.28, 4)
         man.timings["total"] = round(time.time() - started, 1)
 
         violations = validate(cues, audio_duration)
@@ -174,7 +185,8 @@ def run(report_path: str) -> int:
         f"- 轉錄引擎：**{engine}**"
         + (f"（{man.gpu_model}）" if man.gpu_model else ""),
         f"- 音訊長度：{audio_duration / 60:.1f} 分鐘，{len(words):,} 個 word",
-        f"- 字幕：{len(cues):,} 條，降級窗口 {degraded}/{len(windows)}",
+        f"- 字幕：{len(cues):,} 條，加標點失敗 {len(failed)}/{total_chunks} 塊",
+        f"- 原文覆蓋率：{coverage(words, cues) * 100:.1f}%",
         f"- 潤稿成本：約 ${man.cost:.4f}",
         f"- 總耗時：{man.timings['total']:.0f} 秒",
         f"- 驗證：{'✅ 零違規' if not violations else f'⚠️ {len(violations)} 個違規'}",
